@@ -1,0 +1,15 @@
+torch
+torchaudio
+demucs
+numpy
+customtkinter
+tkinterdnd2
+librosa
+soundfile
+openai-whisper
+# basic-pitch
+transformers
+matplotlib
+mido
+bs-roformer
+huggingface_hub

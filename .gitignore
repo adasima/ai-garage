@@ -1,0 +1,13 @@
+# Cache and local databases
+.zenith/
+**/memory.db
+**/memory.db-shm
+**/memory.db-wal
+**/err.txt
+**/error.json
+**/error.txt
+**/error_utf8.txt
+
+# OS files
+.DS_Store
+Thumbs.db

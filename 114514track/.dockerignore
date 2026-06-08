@@ -1,0 +1,37 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Build output
+.next
+out
+build
+
+# Version control
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env*
+
+# Data files (runtime generated)
+data/
+
+# Documentation
+README.md
+*.md
+
+# Test files
+coverage
+*.test.*
+*.spec.*

@@ -1,0 +1,11 @@
+# 本番環境用のスクリプト（トークンやIP等の設定が含まれるためGitから除外）
+setup_openclaw_sandbox.bat
+start_openclaw.bat
+
+# 古いスクリプトやバックアップ等
+openclaw.bat
+
+# ログファイル等の一時ファイル
+*.log
+*.txt
+*.tmp

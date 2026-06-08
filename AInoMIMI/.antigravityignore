@@ -1,0 +1,63 @@
+# Do not read analysis results into context to avoid flooding
+output/
+sessions/
+**/temp_demucs/
+**/stems/
+**/separated/
+
+# One-off utility scripts (not core implementation)
+summarize_json.py
+
+# Large binary files (Audio, Images, Models)
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+*.png
+*.jpg
+*.jpeg
+*.onnx
+*.pth
+*.bin
+*.pt
+
+# Model cache
+.model_cache/
+
+# Build artifacts
+build/
+dist/
+*.spec
+*.manifest
+
+# Configs and Secrets
+config.ini
+settings.json
+.env
+
+# Cache and logs
+**/__pycache__/
+*.pyc
+*.log
+coverage.xml
+.coverage
+
+# Workspace/IDE
+.venv/
+.vscode/
+.idea/
+.git/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# BS-Roformer Temp
+roformer_temp/
+demucs_temp/
+
+# ZFTurbo internals
+modules/zfturbo/.git
+modules/zfturbo/docs/
+modules/zfturbo/tests/

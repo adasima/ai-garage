@@ -1,0 +1,321 @@
+use anyhow::{Context, Result};
+use heck::{ToLowerCamelCase, ToSnakeCase, ToKebabCase};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::fs;
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcRequest {
+    id: Option<Value>,
+    method: String,
+    params: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: String,
+    id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<Value>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let stdin = tokio::io::stdin();
+    let mut reader = BufReader::new(stdin).lines();
+    let mut stdout = tokio::io::stdout();
+
+    while let Some(line) = reader.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        match serde_json::from_str::<JsonRpcRequest>(&line) {
+            Ok(request) => {
+                if let Some(id) = request.id {
+                    let result = handle_request(&request.method, request.params).await;
+                    let response = match result {
+                        Ok(res) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: Some(res),
+                            error: None,
+                        },
+                        Err(e) => {
+                            JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id,
+                                result: None,
+                                error: Some(json!({
+                                    "code": -32603,
+                                    "message": e.to_string(),
+                                })),
+                            }
+                        }
+                    };
+                    let mut res_str = serde_json::to_string(&response)?;
+                    res_str.push('\n');
+                    let _ = stdout.write_all(res_str.as_bytes()).await;
+                    let _ = stdout.flush().await;
+                }
+            }
+            Err(e) => {
+                eprintln!("Parse error: {}", e);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_request(method: &str, params: Option<Value>) -> Result<Value> {
+    match method {
+        "initialize" => Ok(json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": "type-sync-mcp",
+                "version": "0.1.0"
+            }
+        })),
+        "tools/list" => Ok(json!({
+            "tools": [
+                {
+                    "name": "extract_ts_interfaces",
+                    "description": "Parse a Rust .rs file and extract Typescript interface definitions, respecting Serde macro attributes.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "rust_file_path": {
+                                "type": "string",
+                                "description": "Absolute path to the .rs file to parse"
+                            }
+                        },
+                        "required": ["rust_file_path"]
+                    }
+                }
+            ]
+        })),
+        "tools/call" => {
+            let params = params.unwrap_or_else(|| json!({}));
+            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if tool_name == "extract_ts_interfaces" {
+                let args = params.get("arguments").and_then(|v| v.as_object());
+                if let Some(args) = args {
+                    let path = args.get("rust_file_path").and_then(|v| v.as_str()).unwrap_or("");
+                    let result = generate_ts_from_ast(path)?;
+                    Ok(json!({
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": result
+                            }
+                        ]
+                    }))
+                } else {
+                    Err(anyhow::anyhow!("Missing arguments"))
+                }
+            } else {
+                Err(anyhow::anyhow!("Unknown tool"))
+            }
+        }
+        _ => Err(anyhow::anyhow!("Method not found: {}", method)),
+    }
+}
+
+// AST Parser Logic
+fn generate_ts_from_ast(filepath: &str) -> Result<String> {
+    let source = fs::read_to_string(filepath).with_context(|| format!("Failed to read {}", filepath))?;
+    let file_ast = syn::parse_file(&source)?;
+
+    let mut ts_output = String::new();
+    ts_output.push_str("// Auto-generated by type-sync-mcp\n\n");
+
+    for item in file_ast.items {
+        match item {
+            syn::Item::Struct(ref s) => {
+                let struct_name = s.ident.to_string();
+                let rename_all = get_rename_all(&s.attrs);
+                
+                ts_output.push_str(&format!("export interface {} {{\n", struct_name));
+                
+                match &s.fields {
+                    syn::Fields::Named(fields_named) => {
+                        for field in &fields_named.named {
+                            let mut field_name = field.ident.as_ref().unwrap().to_string();
+                            
+                            // Apply rename_all on the struct scope
+                            if let Some(ref rule) = rename_all {
+                                field_name = apply_rename_rule(&field_name, rule);
+                            }
+                            
+                            // Check individual field rename or skip rules
+                            let mut is_optional_by_serde = false;
+                            if let Some(custom_rename) = get_field_rename(&field.attrs) {
+                                field_name = custom_rename;
+                            }
+                            if has_skip_serializing_if_none(&field.attrs) {
+                                is_optional_by_serde = true;
+                            }
+
+                            let (ts_type, is_option) = rust_type_to_ts(&field.ty);
+                            
+                            // If it's skipped when None, or inherently Option, we make the TS field optional
+                            let opt_flag = if is_optional_by_serde || is_option { "?" } else { "" };
+                            
+                            // If it's an Option but not skipped, it could also be `field: T | null`
+                            let ts_type_final = if is_option && !is_optional_by_serde {
+                                format!("{} | null", ts_type)
+                            } else {
+                                ts_type
+                            };
+
+                            ts_output.push_str(&format!("    {}{} : {};\n", field_name, opt_flag, ts_type_final));
+                        }
+                    }
+                    _ => {
+                        ts_output.push_str("    // Tuple or Unit structs not fully supported\n");
+                    }
+                }
+                ts_output.push_str("}\n\n");
+            }
+            syn::Item::Enum(ref e) => {
+                let enum_name = e.ident.to_string();
+                let rename_all = get_rename_all(&e.attrs);
+                
+                ts_output.push_str(&format!("export type {} =\n", enum_name));
+                
+                for variant in &e.variants {
+                    let mut variant_name = variant.ident.to_string();
+                    if let Some(ref rule) = rename_all {
+                         variant_name = apply_rename_rule(&variant_name, rule);
+                    }
+                    if let Some(custom_rename) = get_field_rename(&variant.attrs) {
+                         variant_name = custom_rename;
+                    }
+                    
+                    // Basic support for string/unit variants
+                    ts_output.push_str(&format!("    | \"{}\"\n", variant_name));
+                }
+                ts_output.push_str(";\n\n");
+            }
+            _ => {}
+        }
+    }
+
+    Ok(ts_output)
+}
+
+fn apply_rename_rule(name: &str, rule: &str) -> String {
+    match rule {
+        "camelCase" => name.to_lower_camel_case(),
+        "snake_case" => name.to_snake_case(),
+        "kebab-case" => name.to_kebab_case(),
+        "PascalCase" => {
+            let camel = name.to_lower_camel_case();
+            let mut chars = camel.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + chars.as_str()
+            }
+        },
+        _ => name.to_string()
+    }
+}
+
+// Helpers for Serde AST checking
+fn get_rename_all(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if attr.path().is_ident("serde") {
+            let mut found = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename_all") {
+                    let value: syn::LitStr = meta.value()?.parse()?;
+                    found = Some(value.value());
+                }
+                Ok(())
+            });
+            if found.is_some() { return found; }
+        }
+    }
+    None
+}
+
+fn get_field_rename(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+         if attr.path().is_ident("serde") {
+             let mut found = None;
+             let _ = attr.parse_nested_meta(|meta| {
+                 if meta.path.is_ident("rename") {
+                     let value: syn::LitStr = meta.value()?.parse()?;
+                     found = Some(value.value());
+                 }
+                 Ok(())
+             });
+             if found.is_some() { return found; }
+         }
+    }
+    None
+}
+
+fn has_skip_serializing_if_none(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+         if attr.path().is_ident("serde") {
+             let mut found = false;
+             let _ = attr.parse_nested_meta(|meta| {
+                 if meta.path.is_ident("skip_serializing_if") {
+                     found = true;
+                 }
+                 Ok(())
+             });
+             if found { return true; }
+         }
+    }
+    false
+}
+
+// Convert Rust syn::Type to TS String type, and boolean indicating if it's an Option
+fn rust_type_to_ts(ty: &syn::Type) -> (String, bool) {
+    match ty {
+        syn::Type::Path(type_path) => {
+            let segment = type_path.path.segments.last().unwrap();
+            let ident = segment.ident.to_string();
+            
+            match ident.as_str() {
+                "String" | "str" | "Uuid" => ("string".to_string(), false),
+                "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" | "f32" | "f64" => ("number".to_string(), false),
+                "bool" => ("boolean".to_string(), false),
+                "Option" => {
+                    let inner = extract_inner_type(&segment.arguments);
+                    let (inner_ts, _) = rust_type_to_ts(&inner);
+                    (inner_ts, true)
+                },
+                "Vec" => {
+                    let inner = extract_inner_type(&segment.arguments);
+                    let (inner_ts, _) = rust_type_to_ts(&inner);
+                    (format!("{}[]", inner_ts), false)
+                },
+                "HashMap" => {
+                     // simplified
+                     ("Record<string, any>".to_string(), false)
+                },
+                custom => (custom.to_string(), false) // Map to itself (e.g. nested User struct)
+            }
+        }
+        syn::Type::Reference(type_ref) => rust_type_to_ts(&type_ref.elem),
+        _ => ("any".to_string(), false)
+    }
+}
+
+fn extract_inner_type(args: &syn::PathArguments) -> syn::Type {
+    if let syn::PathArguments::AngleBracketed(angle_args) = args {
+        if let Some(syn::GenericArgument::Type(ty)) = angle_args.args.first() {
+            return ty.clone();
+        }
+    }
+    syn::parse_str::<syn::Type>("any").unwrap()
+}
